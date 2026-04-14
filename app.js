@@ -31,9 +31,26 @@ let brushSize = parseInt(sizeInput.value, 10);
 let rainbow = false;
 
 // Brush model.
-// mode = 'line'  → classic canvas stroke (with optional rainbow hue cycling)
-// mode = 'stamp' → stamp a cached emoji/DOM-snapshot canvas along the path
+// mode = 'line'      → classic canvas stroke (with optional rainbow hue cycling)
+// mode = 'stamp'     → stamp a cached emoji/DOM-snapshot canvas along the path
+// mode = 'live-cam'  → every stamp is a freshly-captured video frame
+// mode = 'live-dom'  → every stamp is a throttled html2canvas snapshot of the stage
 let brush = { mode: "line", stamp: null, stampId: "line" };
+
+// Reusable offscreen canvas we draw the current video frame into, which then
+// becomes the active stamp for the `live-cam` brush.
+const liveCamCanvas = document.createElement("canvas");
+liveCamCanvas.width = 160;
+liveCamCanvas.height = 160;
+const liveCamCtx = liveCamCanvas.getContext("2d");
+
+// Live DOM snapshot is throttled — html2canvas takes ~100-300ms, so we can't
+// call it per stamp. Instead we re-snapshot every LIVE_DOM_TTL ms and reuse
+// the cached canvas as the stamp in between.
+let liveDomCanvas = null;
+let liveDomCapturing = false;
+let liveDomLastAt = 0;
+const LIVE_DOM_TTL = 450; // ms
 
 // Smoothing / gesture state.
 let smoothed = null;
@@ -112,6 +129,19 @@ brushes.addEventListener("click", async (e) => {
     setBrush({ mode: "stamp", stamp, stampId: `emoji:${emoji}` });
     return;
   }
+  if (el.dataset.brush === "live-cam") {
+    setActiveBrush(el);
+    setBrush({ mode: "live-cam", stamp: liveCamCanvas, stampId: "live-cam" });
+    return;
+  }
+  if (el.dataset.brush === "live-dom") {
+    setActiveBrush(el);
+    setBrush({ mode: "live-dom", stamp: null, stampId: "live-dom" });
+    // Warm the cache so the first stamps aren't empty while we wait for
+    // html2canvas to finish the initial capture.
+    refreshLiveDomSnapshot();
+    return;
+  }
   if (el.dataset.brush === "pick") {
     setActiveBrush(el);
     startDomPicker();
@@ -186,6 +216,60 @@ async function makeEmojiStamp(emoji) {
     return canvas;
   } finally {
     host.remove();
+  }
+}
+
+// ---- Live capture helpers -------------------------------------------------
+
+// Grab the current video frame into liveCamCanvas. We crop to a centered
+// square and mirror horizontally so the stamps match what the user sees on
+// screen (the video element is also CSS-mirrored).
+function captureLiveCamFrame() {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return false;
+  const side = Math.min(vw, vh);
+  const sx = (vw - side) / 2;
+  const sy = (vh - side) / 2;
+  liveCamCtx.save();
+  liveCamCtx.translate(liveCamCanvas.width, 0);
+  liveCamCtx.scale(-1, 1);
+  liveCamCtx.drawImage(
+    video,
+    sx, sy, side, side,
+    0, 0, liveCamCanvas.width, liveCamCanvas.height
+  );
+  liveCamCtx.restore();
+  return true;
+}
+
+// Throttled html2canvas of the `.stage` — but we hide the ink + overlay +
+// shatter layers during capture so stamps don't recursively include previous
+// stamps (otherwise you get turtles-all-the-way-down feedback).
+async function refreshLiveDomSnapshot() {
+  if (liveDomCapturing) return;
+  liveDomCapturing = true;
+
+  const stage = document.querySelector(".stage");
+  const hidden = [ink, overlay, shatterLayer];
+  const prev = hidden.map((el) => el.style.visibility);
+  hidden.forEach((el) => (el.style.visibility = "hidden"));
+
+  try {
+    const snap = await html2canvas(stage, {
+      backgroundColor: null,
+      scale: 0.45,   // downscale aggressively — stamps are tiny anyway
+      logging: false,
+      useCORS: true,
+      ignoreElements: (el) => el.id === "picker-overlay" || el.id === "shatter-layer",
+    });
+    liveDomCanvas = snap;
+    liveDomLastAt = performance.now();
+  } catch (err) {
+    console.warn("live-dom snapshot failed", err);
+  } finally {
+    hidden.forEach((el, i) => (el.style.visibility = prev[i]));
+    liveDomCapturing = false;
   }
 }
 
@@ -413,13 +497,22 @@ function drawLineSegment(a, b, velocity) {
 function stampAt(x, y, velocity) {
   if (!brush.stamp) return;
   const stamp = brush.stamp;
-  // Stamp size tracks the brush slider — slider now goes up to 60, so we map
-  // that to a stamp diameter range that feels usable.
-  const base = brushSize * 3;
+  // Emojis are small glyphs — they need multiplying up against the slider.
+  // Live-cam / live-dom already start from a sensible pixel-dimension source
+  // so they scale up more aggressively and read as recognizable snapshots.
+  const scaleForMode = {
+    stamp: 3,
+    "live-cam": 5,
+    "live-dom": 6,
+  }[brush.mode] || 3;
+  const base = brushSize * scaleForMode;
   const v = Math.min(1, velocity / 40);
   const jitter = 1 - v * 0.25 + (Math.random() - 0.5) * 0.15;
   const size = Math.max(14, base * jitter);
-  const angle = (Math.random() - 0.5) * 0.8; // ±~23°
+  // Big rotational jitter makes emojis fun but would make a face-trail look
+  // chaotic, so tame the angle when live-capturing.
+  const angleRange = brush.mode === "line" || brush.mode === "stamp" ? 0.8 : 0.25;
+  const angle = (Math.random() - 0.5) * angleRange;
   const aspect = stamp.height / stamp.width;
 
   inkCtx.save();
@@ -500,16 +593,28 @@ function onResults(results) {
     palmHeldFrames = 0;
 
     if (gesture === "draw") {
+      // Live brushes: refresh the stamp source each draw frame (live-cam) or
+      // at a TTL (live-dom) so every stamp along the trail is a fresh capture.
+      if (brush.mode === "live-cam") {
+        captureLiveCamFrame();
+        brush.stamp = liveCamCanvas;
+      } else if (brush.mode === "live-dom") {
+        if (liveDomCanvas) brush.stamp = liveDomCanvas;
+        if (now - liveDomLastAt > LIVE_DOM_TTL) refreshLiveDomSnapshot();
+      }
+
+      const isStamping = brush.mode !== "line";
+
       if (!wasDrawing) {
         // Start of a fresh stroke.
         lastStrokePt = { x: smoothed.x, y: smoothed.y };
         strokeDistance = 0;
         strokeHue = Math.random() * 360;
-        if (brush.mode === "stamp") stampAt(smoothed.x, smoothed.y, vel);
+        if (isStamping) stampAt(smoothed.x, smoothed.y, vel);
       } else {
         if (brush.mode === "line") {
           drawLineSegment(lastStrokePt, smoothed, vel);
-        } else if (brush.mode === "stamp") {
+        } else if (isStamping) {
           // Walk along the segment and drop stamps every `step` pixels so
           // fast hand motion doesn't leave gaps and slow motion doesn't
           // pile stamps on top of each other.
@@ -520,6 +625,10 @@ function onResults(results) {
           let walked = step - (strokeDistance % step);
           while (walked < dist) {
             const t = walked / dist;
+            // For live-cam, capture a fresh frame at *every* stamp point so
+            // the trail really is stop-motion instead of reusing one capture
+            // per draw frame. Cheap — just a drawImage from the video.
+            if (brush.mode === "live-cam") captureLiveCamFrame();
             stampAt(lastStrokePt.x + dx * t, lastStrokePt.y + dy * t, vel);
             walked += step;
           }
@@ -536,8 +645,14 @@ function onResults(results) {
     }
   }
 
+  const drawLabel = {
+    line: "✏️  drawing",
+    stamp: "⭐  stamping",
+    "live-cam": "📸  live cam",
+    "live-dom": "🖼️  live screen",
+  }[brush.mode] || "✏️  drawing";
   gestureEl.textContent = {
-    draw: brush.mode === "stamp" ? "🖼  stamping" : "✏️  drawing",
+    draw: drawLabel,
     hover: "✌️  hover",
     clear: "🖐  clearing…",
     idle: "· idle",
