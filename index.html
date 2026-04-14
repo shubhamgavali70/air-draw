@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="style.css" />
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" crossorigin="anonymous"></script>
   </head>
   <body>
     <div class="stage">
@@ -28,17 +29,43 @@
           <button class="swatch" data-color="#af52de" style="--c:#af52de"></button>
           <button class="swatch" data-color="#ffffff" style="--c:#ffffff"></button>
         </div>
+
+        <div class="divider"></div>
+
+        <div class="brushes" id="brushes">
+          <button class="brush active" data-brush="line" title="Line brush">✏️</button>
+          <button class="brush" data-brush="stamp" data-emoji="⭐" title="Star stamp">⭐</button>
+          <button class="brush" data-brush="stamp" data-emoji="❤️" title="Heart stamp">❤️</button>
+          <button class="brush" data-brush="stamp" data-emoji="🌸" title="Flower stamp">🌸</button>
+          <button class="brush" data-brush="stamp" data-emoji="✨" title="Sparkle stamp">✨</button>
+          <button class="brush" data-brush="pick" title="Pick any element on the page as your brush">🪄</button>
+        </div>
+
+        <div class="divider"></div>
+
         <label class="size">
           <span>Size</span>
-          <input type="range" id="size" min="2" max="30" value="6" />
+          <input type="range" id="size" min="2" max="60" value="8" />
         </label>
+
+        <label class="toggle" title="Cycle hue along each stroke">
+          <input type="checkbox" id="rainbow" />
+          <span>🌈</span>
+        </label>
+
         <button id="clear" class="btn">Clear</button>
-        <button id="save" class="btn">Save PNG</button>
+        <button id="save" class="btn">Save</button>
       </div>
 
       <div class="hint">
-        ☝️ index only = draw · ✌️ index+middle = hover · 🖐 open palm = clear
+        ☝️ draw · ✌️ hover · 🖐 hold to shatter-clear · 🪄 picks a DOM element as your brush
       </div>
+
+      <div id="picker-overlay" hidden>
+        <div class="picker-msg">Click any element to turn it into a brush — <kbd>Esc</kbd> to cancel</div>
+      </div>
+
+      <div id="shatter-layer"></div>
     </div>
 
     <script src="app.js"></script>
